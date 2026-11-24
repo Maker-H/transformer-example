@@ -1,0 +1,10 @@
+class Optimizer:
+    def __init__(self, params=None, defaults=None):
+        self.param_groups = [{"lr": 0}]
+        self.defaults = defaults or {}
+
+    def step(self):
+        return None
+
+    def zero_grad(self, set_to_none=False):
+        return None

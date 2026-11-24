@@ -1,0 +1,522 @@
+"""직접 읽어 볼 수 있는 텐서와 기본 연산입니다. 값은 NumPy 배열로 들고, 계산의 뜻은 이 파일에 적어 두었습니다."""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+
+import numpy as np
+
+
+uint8 = np.uint8
+int64 = np.int64
+float32 = np.float32
+float64 = np.float64
+
+
+def _tensor_to_array(value):
+    if isinstance(value, Tensor):
+        return value._array
+    return value
+
+
+def _convert_negative_axis_to_positive(target_dim, total_dim):
+    if target_dim < 0:
+        target_dim = target_dim + total_dim
+    return target_dim
+
+
+def _fill_minus_one_with_inferred_length(shape, total_element_count):
+    shape = tuple(shape)
+    if shape.count(-1) > 1:
+        raise ValueError("view에는 -1이 두 개 이상 올 수 없습니다.")
+    # (3, -1)
+    if -1 in shape:
+        known_length_product = 1
+    
+        for axis_length in shape:
+            if axis_length != -1:
+                known_length_product *= axis_length
+        inferred_length = total_element_count // known_length_product
+        
+        filled_shape = []
+        for axis_length in shape:
+            if axis_length == -1:
+                filled_shape.append(inferred_length)
+            else:
+                filled_shape.append(axis_length)
+        shape = tuple(filled_shape)
+
+    return shape
+
+
+class Size(tuple):
+    def __repr__(self):
+        return "Size(" + super().__repr__() + ")"
+
+
+class Tensor:
+    """다차원 배열입니다. torch.Tensor 대신, 이 프로젝트에서 쓰는 메서드만 있습니다."""
+    
+    def __init__(self, data=None, dataType=None, _array=None):
+        if _array is not None:
+            self._array = np.asarray(_array)
+            return
+        if data is None:
+            raise TypeError("Tensor에 값이 필요합니다.")
+        if isinstance(data, Tensor):
+            source_array = data._array
+            self._array = source_array if dataType is None else source_array.astype(dataType, copy=False)
+            return
+        self._array = np.array(data, dtype=dataType)
+
+    @property
+    def data(self):
+        # 학습 그래프가 없어서, torch의 .data처럼 같은 값을 그대로 돌려줍니다.
+        return self
+
+    @property
+    def shape(self):
+        return self._array.shape
+
+    @property
+    def dataType(self):
+        return self._array.dtype
+
+    def size(self, target_dim=None):
+        if target_dim is None:
+            return Size(self._array.shape)
+        return self._array.shape[_convert_negative_axis_to_positive(target_dim, self._array.ndim)]
+
+    def total_dim(self):
+        return self._array.ndim
+
+    def dim(self):
+        # torch와 같은 이름입니다. make_model.py가 parameter.dim()으로 부릅니다.
+        return self.total_dim()
+
+    def element_length(self):
+        return int(self._array.size)
+
+    """shape는 ()로도 (())로도 들어올 수 있음"""
+    """ *shape는 리스트를 통째로 하나의 인자로 받아서 ([], ) 가됨"""
+    def view(self, *shape):
+        """원소 순서는 그대로 두고 모양만 바꿉니다. -1은 나머지 길이를 자동으로 넣습니다."""
+        if len(shape) == 1 and isinstance(shape[0], (tuple, list, Size)):
+            shape = tuple(shape[0]) # 튜플인걸 넣으면 그대로 튜플로 나옴
+        new_shape = _fill_minus_one_with_inferred_length(shape, self._array.size)
+
+        """메모리에 한줄로 오게 정리하고 """
+        return Tensor(_array=np.ascontiguousarray(self._array).reshape(new_shape))
+
+    def reshape(self, *shape):
+        return self.view(*shape)
+
+    def transpose(self, axis_a_input, axis_b_input):
+
+        """
+        axis_a_input과 axis_b_input은 바꿀 두 축의 번호입니다.
+        축 번호는 앞에서부터 0, 1, 2로 세고, -1은 마지막 축, -2는 마지막에서 두 번째 축을 뜻합니다.
+
+        예를 들어 [[1, 2], [3, 4], [5, 6]]은 3줄에 2칸씩 있는 배열이고, 모양은 (3, 2)입니다.
+        이 배열에서 0번 축과 1번 축을 바꾸면 [[1, 3, 5], [2, 4, 6]]이 되고, 모양은 (2, 3)이 됩니다.
+        줄과 칸이 서로 뒤바뀌었을 뿐, 숫자는 하나도 사라지거나 바뀌지 않습니다.
+        """
+
+        axis_count = self._array.ndim # 축 개수
+        axis_a = _convert_negative_axis_to_positive(axis_a_input, axis_count)
+        axis_b = _convert_negative_axis_to_positive(axis_b_input, axis_count)
+        axis_order = list(range(axis_count))
+        axis_order[axis_a], axis_order[axis_b] = axis_order[axis_b], axis_order[axis_a]
+        return Tensor(_array=np.transpose(self._array, axis_order))
+
+    def unsqueeze(self, dim):
+        """
+        길이가 1인 축을 하나 끼워넣는 함수
+        """
+        dim = dim if dim >= 0 else _convert_negative_axis_to_positive(dim, self._array.ndim + 1)
+        return Tensor(_array=np.expand_dims(self._array, dim))
+
+    def contiguous(self):
+        return Tensor(_array=np.ascontiguousarray(self._array))
+
+    def clone(self):
+        return Tensor(_array=self._array.copy())
+
+    def type_as(self, other):
+        """other의 자료형과 똑같이 맞춘 새 tensor을 돌려줌"""
+        return Tensor(_array=self._array.astype(_tensor_to_array(other).dtype, copy=True))
+
+    def type(self, dataType):
+        return Tensor(_array=self._array.astype(dataType, copy=True))
+
+
+    def fill_(self, value):
+        """모든 칸을 value로 치환"""
+        if isinstance(value, Tensor):
+            value = value._array
+        if isinstance(value, np.ndarray):
+            value = value.item()
+        self._array.fill(value)
+        return self
+
+    def float(self):
+        return Tensor(_array=self._array.astype(np.float32, copy=True))
+
+    def long(self):
+        return Tensor(_array=self._array.astype(np.int64, copy=True))
+
+    def softmax(self, dim=-1):
+        return softmax(self, dim=dim)
+
+    def relu(self):
+        """모든 칸에서 0이랑 비교해서 더 큰값을 고름, _array에서 음수는 사라짐"""
+        return Tensor(_array=np.maximum(self._array, 0))
+
+    def masked_fill(self, mask, value):
+        """mask가 참인 자리를 value로 바꿉니다"""
+        filled_array = self._array.copy()
+
+        # 마스크를 복사해서 filled_array.shape와 같은 모양을 만들어줌
+        broadcast_mask = np.broadcast_to(np.asarray(_tensor_to_array(mask), dtype=bool), filled_array.shape)
+        filled_array[broadcast_mask] = value # True인 곳을 value로 치환
+        return Tensor(_array=filled_array)
+
+    def mean(self, dim=None, keepdim=False):
+        """어느 축 방향으로 평균 낼지 구하고, keepDim 값에 따라 평균 낸 축 없앨지 결정"""
+        return Tensor(_array=self._array.mean(axis=dim, keepdims=keepdim))
+
+    def std(self, dim=None, keepdim=False, unbiased=True):
+        """그냥 표준편차 구한다고 생각하면 됨"""
+        # torch.std 기본값은 표본 표준편차입니다 (ddof=1).
+        ddof = 1 if unbiased else 0
+        return Tensor(_array=self._array.std(axis=dim, keepdims=keepdim, ddof=ddof))
+
+    def requires_grad_(self, requires_grad=True):
+        return self
+
+    def detach(self):
+        return self
+
+    def item(self):
+        return self._array.item()
+
+    def numpy(self):
+        return self._array.copy()
+
+    def __getitem__(self, index):
+        index = _unwrap_index(index)
+        result = self._array[index]
+        if np.isscalar(result):
+            return Tensor(_array=np.array(result))
+        return Tensor(_array=result)
+
+    def __setitem__(self, index, value):
+        self._array[_unwrap_index(index)] = _tensor_to_array(value)
+
+    def __len__(self):
+        return self._array.shape[0]
+
+    def __iter__(self):
+        for i in range(len(self)):
+            yield self[i]
+
+    def __repr__(self):
+        return "tensor(" + np.array2string(self._array, precision=4, suppress_small=True) + ")"
+
+    def __str__(self):
+        return self.__repr__()
+
+    def __add__(self, other):
+        return Tensor(_array=self._array + _tensor_to_array(other))
+
+    def __radd__(self, other):
+        return Tensor(_array=_tensor_to_array(other) + self._array)
+
+    def __sub__(self, other):
+        return Tensor(_array=self._array - _tensor_to_array(other))
+
+    def __rsub__(self, other):
+        return Tensor(_array=_tensor_to_array(other) - self._array)
+
+    def __mul__(self, other):
+        return Tensor(_array=self._array * _tensor_to_array(other))
+
+    def __rmul__(self, other):
+        return Tensor(_array=_tensor_to_array(other) * self._array)
+
+    def __truediv__(self, other):
+        return Tensor(_array=self._array / _tensor_to_array(other))
+
+    def __rtruediv__(self, other):
+        return Tensor(_array=_tensor_to_array(other) / self._array)
+
+    def __neg__(self):
+        return Tensor(_array=-self._array)
+
+    def __eq__(self, other):
+        return Tensor(_array=self._array == _tensor_to_array(other))
+
+    def __ne__(self, other):
+        return Tensor(_array=self._array != _tensor_to_array(other))
+
+    def __lt__(self, other):
+        return Tensor(_array=self._array < _tensor_to_array(other))
+
+    def __le__(self, other):
+        return Tensor(_array=self._array <= _tensor_to_array(other))
+
+    def __gt__(self, other):
+        return Tensor(_array=self._array > _tensor_to_array(other))
+
+    def __ge__(self, other):
+        return Tensor(_array=self._array >= _tensor_to_array(other))
+
+    def __and__(self, other):
+        return Tensor(_array=np.logical_and(self._array, _tensor_to_array(other)))
+
+    def __or__(self, other):
+        return Tensor(_array=np.logical_or(self._array, _tensor_to_array(other)))
+
+    def __invert__(self):
+        return Tensor(_array=np.logical_not(self._array))
+
+    def __matmul__(self, other):
+        return matmul(self, other)
+
+    def __float__(self):
+        return float(self._array)
+
+    def __int__(self):
+        return int(self._array)
+
+    def __bool__(self):
+        if self._array.size != 1:
+            raise ValueError("텐서의 값이 여러 개일 때는 참 거짓을 바로 쓰지 마세요.")
+        return bool(self._array)
+
+    def __deepcopy__(self, memo):
+        cloned = Tensor(_array=self._array.copy())
+        memo[id(self)] = cloned
+        return cloned
+
+
+def _unwrap_index(index):
+    if isinstance(index, Tensor):
+        return index._array
+    if isinstance(index, tuple):
+        return tuple(_unwrap_index(sub_index) for sub_index in index)
+    if isinstance(index, list):
+        return [_unwrap_index(sub_index) for sub_index in index]
+    return index
+
+
+def tensor(data, dataType=None):
+    if isinstance(data, Tensor):
+        return data.clone() if dataType is None else Tensor(data, dataType=dataType)
+    return Tensor(data, dataType=dataType)
+
+
+def LongTensor(data):
+    return Tensor(data, dataType=np.int64)
+
+
+def zeros(*shape, dataType=np.float32):
+    if len(shape) == 1 and isinstance(shape[0], (tuple, list, Size)):
+        shape = tuple(shape[0])
+    return Tensor(_array=np.zeros(shape, dtype=dataType))
+
+
+def ones(*shape, dataType=np.float32):
+    if len(shape) == 1 and isinstance(shape[0], (tuple, list, Size)):
+        shape = tuple(shape[0])
+    return Tensor(_array=np.ones(shape, dtype=dataType))
+
+
+def empty(*shape, dataType=np.float32):
+    """시간 아까워서 가비지 값으로 채워짐"""
+    if len(shape) == 1 and isinstance(shape[0], (tuple, list, Size)):
+        shape = tuple(shape[0])
+    return Tensor(_array=np.empty(shape, dtype=dataType))
+
+
+def arange(start, end=None, step=1, dataType=None):
+    if end is None:
+        start, end = 0, start
+    if dataType is None:
+        if any(isinstance(bound_value, float) for bound_value in (start, end, step)):
+            dataType = np.float32
+        else:
+            dataType = np.int64
+    return Tensor(_array=np.arange(start, end, step, dtype=dataType))
+
+
+def _matmul_2d_by_hand(left_matrix, right_matrix):
+    """두 행렬의 곱을 계산.
+
+    결과의 [row, col] 칸은 left_matrix의 row번째 행과 right_matrix의 col번째 열을
+    같은 위치끼리 곱해서 모두 더한 값(내적)입니다.
+    left_matrix가 (3, 2)이고 right_matrix가 (2, 3)이면 결과는 (3, 3)입니다.
+    """
+    left_row_count, left_col_count = left_matrix.shape
+    right_row_count, right_col_count = right_matrix.shape
+    if left_col_count != right_row_count:
+        raise ValueError(
+            "행렬곱은 왼쪽 행렬의 열 개수와 오른쪽 행렬의 행 개수가 같아야 합니다. "
+            + str(left_matrix.shape) + "와 " + str(right_matrix.shape)
+        )
+    shared_length = left_col_count
+
+    result_dtype = np.result_type(left_matrix, right_matrix, np.float32)
+    result_matrix = np.zeros((left_row_count, right_col_count), dtype=result_dtype)
+
+    for row in range(left_row_count):
+        for col in range(right_col_count):
+            dot_product_sum = 0.0
+            for shared_index in range(shared_length):
+                dot_product_sum += left_matrix[row, shared_index] * right_matrix[shared_index, col]
+            result_matrix[row, col] = dot_product_sum
+    return result_matrix
+
+
+HAND_MATMUL_MAX_WORK = 4096
+
+def matmul(left, right):
+    """행렬곱
+    """
+    left_array = _tensor_to_array(left)
+    right_array = _tensor_to_array(right)
+
+    left_was_1d = left_array.ndim == 1
+    if left_was_1d:
+        left_array = left_array[np.newaxis, :] # 이 자리에 길이 1인 축 새로, :는 원래 있던 축은 그대로
+
+    right_was_1d = right_array.ndim == 1
+    if right_was_1d:
+        right_array = right_array[:, np.newaxis]
+
+    left_col_count = left_array.shape[-1] # 열개수
+    right_row_count = right_array.shape[-2] #행개수
+    if left_col_count != right_row_count:
+        raise ValueError(
+            "행렬곱은 왼쪽의 열 개수와 오른쪽의 행 개수가 같아야 합니다. "
+            + str(left_array.shape) + "와 " + str(right_array.shape)
+        )
+
+    both_are_2d = left_array.ndim == 2 and right_array.ndim == 2
+    multiply_count = left_array.shape[0] * left_array.shape[1] * right_array.shape[-1]
+    use_hand_calculation = both_are_2d and multiply_count <= HAND_MATMUL_MAX_WORK
+
+    if use_hand_calculation:
+        result_array = _matmul_2d_by_hand(left_array, right_array)
+    else:
+        result_array = np.matmul(left_array, right_array)
+
+    if left_was_1d:
+        result_array = result_array[0]
+    if right_was_1d:
+        result_array = result_array[..., 0]
+    return Tensor(_array=np.ascontiguousarray(result_array))
+
+def softmax(scores, dim=-1):
+    """모든 칸이 0과 1사이가 되고 전체 합을 1로 맞추려고 하는 것"""
+    score_array = _tensor_to_array(scores)
+    softmax_axis = _convert_negative_axis_to_positive(dim, score_array.ndim)
+
+    max_along_axis = score_array.max(axis=softmax_axis, keepdims=True)
+    scores_minus_max = score_array - max_along_axis # 행에서 행 빼기
+
+    exp_scores = np.exp(scores_minus_max)
+    exp_sum_along_axis = exp_scores.sum(axis=softmax_axis, keepdims=True)
+    probabilities = exp_scores / exp_sum_along_axis
+
+    return Tensor(_array=probabilities)
+
+
+def cat(tensors, dim=0):
+    """지정한 축으로 이어 붙여서 한 줄의 tensor로 만듬"""
+    arrays = [_tensor_to_array(each_tensor) for each_tensor in tensors]
+    return Tensor(_array=np.concatenate(arrays, axis=dim))
+
+
+def max(source, dim=None, keepdim=False):
+    """
+    dim이 없으면 전체에서 가장 큰 값 하나만 돌려줌.
+    dim이 있으면 그 축 방향에서 가장 큰 값들과, 그 값들이 있던 칸 번호를 함께 돌려줌.
+    """
+    source_array = _tensor_to_array(source)
+
+    # dim이 없으면 전체에서 가장 큰 값 하나만 돌려줍니다.
+    if dim is None:
+        overall_max_value = source_array.max()
+        return Tensor(_array=np.array(overall_max_value))
+
+    # dim이 있으면 그 축 방향으로 가장 큰 값들과, 그 값들의 칸 번호를 함께 돌려줍니다.
+    search_axis = _convert_negative_axis_to_positive(dim, source_array.ndim)
+    max_values_along_axis = source_array.max(axis=search_axis, keepdims=keepdim)
+    max_value_positions = source_array.argmax(axis=search_axis, keepdims=keepdim)
+    return (
+        Tensor(_array=max_values_along_axis),
+        Tensor(_array=max_value_positions.astype(np.int64)),
+    )
+
+
+def triu(source, diagonal=0):
+    """위쪽 삼각형만 남기고 나머지 칸은 0으로 채운 새 Tensor를 돌려줍니다.
+
+    마지막 두 축을 행과 열로 보고, 열 번호가 (행 번호 + diagonal) 이상인 칸만 원래 값을 남깁니다.
+    diagonal이 0이면 대각선까지 남고, 1이면 대각선 바로 위부터 남습니다.
+    """
+    source_array = _tensor_to_array(source)
+    # 모양과 자료형이 똑같고, 모든 칸이 0인 새 배열을 만듬
+    upper_triangle_array = np.zeros_like(source_array)
+
+    row_count = source_array.shape[-2]
+    col_count = source_array.shape[-1]
+
+    for row in range(row_count):
+        for col in range(col_count):
+            diagonal_start_col = row + diagonal
+
+            if col >= diagonal_start_col:
+                is_on_or_above_diagonal = True
+            else:
+                is_on_or_above_diagonal = False
+
+            if is_on_or_above_diagonal:
+                upper_triangle_array[..., row, col] = source_array[..., row, col]
+
+    return Tensor(_array=upper_triangle_array)
+
+def exp(tensor):
+    """ e를 x번 거듭제곱한 값"""
+    return Tensor(_array=np.exp(_tensor_to_array(tensor)))
+
+
+def sin(tensor):
+    """sinx"""
+    return Tensor(_array=np.sin(_tensor_to_array(tensor)))
+
+
+def cos(tensor):
+    """cosx """
+    return Tensor(_array=np.cos(_tensor_to_array(tensor)))
+
+
+def log(tensor):
+    """자연로그"""
+    return Tensor(_array=np.log(_tensor_to_array(tensor)))
+
+
+def manual_seed(seed):
+    """무작위 숫자를 만드는 출발점 고정해서 실행할 때마다 똑같은 무작위 숫자 나오게 함"""
+    np.random.seed(int(seed))
+
+
+@contextmanager
+def no_grad():
+    """아무것도 아님"""
+    yield
+
+
+def is_tensor(value):
+    return isinstance(value, Tensor)

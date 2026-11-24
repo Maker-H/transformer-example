@@ -1,0 +1,26 @@
+
+import numpy as np
+
+from arr_fun.tensor import Tensor, _tensor_to_array, _convert_negative_axis_to_positive, softmax
+
+
+def log_softmax(scores, dim=-1):
+    """
+    softmax에 로그를 취한 값
+    softmax는 숫자 목록을 다 더하면 1이 되는 확률로 바꿔주는 함수 
+    """
+    score_array = _tensor_to_array(scores)
+    softmax_axis = _convert_negative_axis_to_positive(dim, score_array.ndim)
+
+    scores_minus_max = score_array - score_array.max(axis=softmax_axis, keepdims=True)
+    exp_scores = np.exp(scores_minus_max)
+    return Tensor(
+        # log(exp_scores)= scores_minus_max임
+        # log(exp_scores / exp_scores.sum) 이라고 이해하면 됨
+        _array=scores_minus_max - np.log(exp_scores.sum(axis=softmax_axis, keepdims=True))
+    )
+
+
+def relu(input_tensor):
+    """음수는 0으로 바꾸고 양수는 그대로 두는 함수"""
+    return Tensor(_array=np.maximum(_tensor_to_array(input_tensor), 0))

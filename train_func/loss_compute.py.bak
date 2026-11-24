@@ -1,0 +1,54 @@
+import math
+import os
+import sys
+
+# 이 파일을 실행 버튼으로 바로 돌려도 프로젝트 폴더를 찾을 수 있게, 프로젝트 폴더를 경로에 넣어요.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from arr_fun.tensor import Tensor
+from help_func import trace
+from help_func.trace import log
+
+
+class SimpleLossCompute:
+    """Annotated Transformer의 SimpleLossCompute를 옮긴 것이에요.
+    디코더 출력을 Generator로 단어 확률로 바꾸고, 정답 단어를 얼마나 못 맞혔는지 손실을 계산해요.
+    원본은 criterion으로 LabelSmoothing을 쓰는데, smoothing이 0이면 아래처럼
+    '정답 토큰 로그확률에 마이너스를 붙여서 다 더한 값'과 같아요. 그래서 그 계산을 직접 썼어요.
+    """
+
+    def __init__(self, generator, pad_id):
+        self.generator = generator
+        self.pad_id = pad_id
+
+    def __call__(self, decoder_output, target_tokens, num_target_tokens):
+        log("Generator로 디코더 출력을 단어장 토큰마다 로그확률로 바꿔요. (Generator 안쪽 로그는 길어서 꺼 둬요.)")
+        with trace.quiet():
+            log_probs = self.generator(decoder_output)
+        log(f"    log_probs 모양 {tuple(log_probs.size())}: 문장 수, 자리 수, 단어장 토큰 수 순서예요.")
+
+        log("자리마다 정답 토큰의 로그확률을 꺼내서 마이너스를 붙이면 그 자리의 손실이에요.")
+        log("    정답 확률이 100%면 손실이 0이고, 확률이 낮을수록 손실이 커져요. 패딩 자리는 빼요.")
+        log_prob_rows = log_probs.numpy().tolist()
+        target_rows = target_tokens.numpy().tolist()
+        loss_sum = 0.0
+        for sentence_index, (sentence_log_probs, sentence_targets) in enumerate(zip(log_prob_rows, target_rows)):
+            pieces = []
+            for position_log_probs, target_token in zip(sentence_log_probs, sentence_targets):
+                target_token = int(target_token)
+                if target_token == self.pad_id:
+                    pieces.append(f"{target_token}(패딩이라 뺌)")
+                    continue
+                token_loss = -position_log_probs[target_token]
+                loss_sum += token_loss
+                pieces.append(f"{target_token}(확률 {math.exp(-token_loss) * 100:.0f}%, 손실 {token_loss:.2f})")
+            log(f"    문장 {sentence_index + 1} 정답 토큰: " + "  ".join(pieces))
+        log(f"    손실 합계 = {loss_sum:.2f}")
+
+        log("손실 합계를 정답 토큰 수로 나눠서, 토큰 하나당 평균 손실로 만들어요.")
+        log("    이렇게 나눠야 문장이 길든 짧든 같은 기준으로 비교할 수 있고, 가중치를 고치는 크기도 일정해져요.")
+        loss_per_token = Tensor(loss_sum / num_target_tokens)
+        log(f"    {loss_sum:.2f} / {num_target_tokens} = {float(loss_per_token):.4f}")
+
+        # 원본처럼 (손실 합계, 역전파에 쓸 평균 손실) 두 개를 돌려줘요.
+        return loss_sum, loss_per_token
